@@ -245,15 +245,15 @@ def _pack_pages(lines: list[dict]) -> list[dict]:
 def _lead_anim_duration(lead_window: float, animate: bool) -> float:
     if not animate or lead_window < config.PAGE_LEAD_ANIM_MIN_S:
         return 0.0
-    dur = min(config.PAGE_LEAD_ANIM_MAX_S, lead_window * config.PAGE_LEAD_ANIM_RATIO)
-    return min(dur, lead_window)
+    target = config.PAGE_LEAD_ANIM_MAX_S * config.PAGE_LEAD_ANIM_RATIO
+    return min(target, lead_window)
 
 
 def _fade_anim_duration(hold_window: float, animate: bool) -> float:
     if not animate or hold_window < config.PAGE_FADE_ANIM_MIN_S:
         return 0.0
-    dur = min(config.PAGE_FADE_ANIM_MAX_S, hold_window * config.PAGE_FADE_ANIM_RATIO)
-    return min(dur, hold_window)
+    target = config.PAGE_FADE_ANIM_MAX_S * config.PAGE_FADE_ANIM_RATIO
+    return min(target, hold_window)
 
 
 def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
