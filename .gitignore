@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets and local config
+.env
+client_secrets.json
+token.pickle
+
+# Runtime artifacts
+jobs.db
+outputs/
+temp/
+terminals/
+*.webm
+*.mp3
+*.wav
+*.m4a
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local dev scratch (root copies only)
+/run_url.py
+/audio_visualizer.py

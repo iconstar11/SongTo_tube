@@ -1,0 +1,13 @@
+python-telegram-bot
+openai
+yt-dlp
+yt-dlp-ejs
+demucs
+librosa
+numpy
+soundfile
+Pillow
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+python-dotenv
