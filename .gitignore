@@ -29,3 +29,12 @@ Thumbs.db
 # Local dev scratch (root copies only)
 /run_url.py
 /audio_visualizer.py
+
+# xpt experiment outputs (keep source .py / .md only)
+xpt/*.mp4
+xpt/*.png
+xpt/*.wav
+xpt/frames/
+xpt/out_frames/
+xpt/render_frames*/
+xpt/job_*.json
