@@ -256,26 +256,107 @@ def _fade_anim_duration(hold_window: float, animate: bool) -> float:
     return min(target, hold_window)
 
 
+def _min_lead_before_first_word(page: dict) -> float:
+    ms = config.PAGE_MIN_LEAD_MS if page.get("animate") else config.PAGE_MIN_LEAD_TIGHT_MS
+    return ms / 1000.0
+
+
+def _apply_page_anim_flags(page: dict) -> None:
+    lead_window = max(0.0, page["content_start"] - page["show_start"])
+    hold_window = max(0.0, page["show_end"] - page["content_end"])
+
+    page["lead_anim_dur"] = _lead_anim_duration(lead_window, page["animate"])
+    if page["lead_anim_dur"] > 0:
+        # Finish fade-in by the first sung word so sing-along text is fully readable.
+        page["lead_anim_dur"] = min(page["lead_anim_dur"], lead_window)
+
+    page["fade_out_dur"] = _fade_anim_duration(hold_window, page["animate"])
+    page["animate_lead_in"] = page["lead_anim_dur"] >= 0.25
+    page["animate_fade_out"] = page["fade_out_dur"] >= 0.25
+
+
+def _incoming_gap_s(pages: list[dict], pi: int) -> float:
+    if pi == 0:
+        return config.PAGE_HOLD_MAX_S + config.LEAD_IN_MS / 1000.0
+    return max(0.0, pages[pi]["content_start"] - pages[pi - 1]["content_end"])
+
+
+def _trim_prev_for_tight_next(pages: list[dict], pi: int, intro_dur: float) -> None:
+    """End the previous page early so a tight next page can show before its first word."""
+    if pi == 0:
+        return
+
+    page = pages[pi]
+    prev = pages[pi - 1]
+    if not page.get("tight_incoming"):
+        return
+
+    min_lead = config.PAGE_MIN_LEAD_TIGHT_MS / 1000.0
+    deadline = page["content_start"] - min_lead
+
+    prev["show_end"] = min(prev["show_end"], deadline)
+    prev["show_end"] = max(prev["show_end"], prev["content_start"])
+    prev["hold_after"] = max(0.0, prev["show_end"] - prev["content_end"])
+    prev["fade_out_dur"] = 0.0
+    prev["animate_fade_out"] = False
+
+    page["show_start"] = max(prev["show_end"], page["_ideal_start"], intro_dur)
+    page["show_start"] = min(page["show_start"], page["content_start"])
+    page["show_end"] = max(page["show_end"], page["show_start"] + 0.05)
+    _apply_page_anim_flags(page)
+    _apply_page_anim_flags(prev)
+
+
+def _enforce_first_word_lead(pages: list[dict], intro_dur: float) -> None:
+    """Tight pages: never appear after the first word; always keep a small read-ahead."""
+    for pi, page in enumerate(pages):
+        if not page.get("tight_incoming"):
+            continue
+
+        cs = page["content_start"]
+        min_lead = config.PAGE_MIN_LEAD_TIGHT_MS / 1000.0
+        latest_show_start = cs - min_lead
+
+        if page["show_start"] <= latest_show_start:
+            continue
+
+        _trim_prev_for_tight_next(pages, pi, intro_dur)
+        page["show_start"] = min(page["show_start"], latest_show_start, cs)
+        if pi > 0:
+            page["show_start"] = max(page["show_start"], pages[pi - 1]["show_end"])
+        else:
+            page["show_start"] = max(page["show_start"], intro_dur)
+
+        page["show_end"] = max(page["show_end"], page["show_start"] + 0.05)
+        _apply_page_anim_flags(page)
+
+
 def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
     """Assign show_start/show_end and animation flags without mutating word timestamps."""
     lead_max = config.LEAD_IN_MS / 1000.0
+    tight_lead = config.PAGE_MIN_LEAD_TIGHT_MS / 1000.0
 
     for pi, page in enumerate(pages):
         cs = page["content_start"]
         ce = page["content_end"]
+        incoming_gap = _incoming_gap_s(pages, pi)
 
         if pi + 1 < len(pages):
             transition_gap = max(0.0, pages[pi + 1]["content_start"] - ce)
         else:
             transition_gap = config.PAGE_HOLD_MAX_S + lead_max
 
+        tight_incoming = incoming_gap < config.ANIM_MIN_GAP_S
+        tight_outgoing = transition_gap < config.ANIM_MIN_GAP_S
+        page["tight_incoming"] = tight_incoming
+        page["tight_outgoing"] = tight_outgoing
         page["transition_gap"] = transition_gap
 
-        if transition_gap < config.ANIM_MIN_GAP_S:
-            eff_lead = 0.0
+        if tight_outgoing:
             hold = 0.0
             fade_out = 0.0
             animate = False
+            eff_lead = tight_lead if tight_incoming else 0.0
         elif transition_gap < config.GAP_MEDIUM_BREAK_S:
             eff_lead = min(lead_max, transition_gap * 0.25)
             hold = min(transition_gap * 0.3, config.PAGE_HOLD_MAX_S * 0.5)
@@ -287,6 +368,10 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
             animate = True
             fade_out = _fade_anim_duration(hold, animate)
 
+        if tight_incoming:
+            eff_lead = max(eff_lead, tight_lead)
+            animate = False
+
         page["effective_lead_in"] = eff_lead
         page["hold_after"] = hold
         page["animate"] = animate
@@ -295,6 +380,8 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
         page["_show_end"] = ce + hold + fade_out
 
     for pi, page in enumerate(pages):
+        _trim_prev_for_tight_next(pages, pi, intro_dur)
+
         if pi == 0:
             page["show_start"] = max(page["_ideal_start"], intro_dur)
         else:
@@ -302,22 +389,17 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
             page["show_start"] = max(prev["show_end"], page["_ideal_start"], intro_dur)
             if prev["show_end"] > page["show_start"]:
                 prev["show_end"] = page["show_start"]
-                if prev["show_end"] - prev["content_end"] < 0.15:
-                    prev["animate_fade_out"] = False
-                    prev["fade_out_dur"] = 0.0
+                prev["fade_out_dur"] = 0.0
+                prev["animate_fade_out"] = False
 
+        page["show_start"] = min(page["show_start"], page["content_start"])
         page["show_end"] = max(page["_show_end"], page["show_start"] + 0.05)
-
-        lead_window = max(0.0, page["content_start"] - page["show_start"])
-        hold_window = max(0.0, page["show_end"] - page["content_end"])
-
-        page["lead_anim_dur"] = _lead_anim_duration(lead_window, page["animate"])
-        page["fade_out_dur"] = _fade_anim_duration(hold_window, page["animate"])
-        page["animate_lead_in"] = page["lead_anim_dur"] >= 0.25
-        page["animate_fade_out"] = page["fade_out_dur"] >= 0.25
+        _apply_page_anim_flags(page)
 
         page["start_sec"] = page["content_start"]
         page["end_sec"] = page["content_end"]
+
+    _enforce_first_word_lead(pages, intro_dur)
 
 
 def _build_pages(lines: list[dict], intro_dur: float) -> list[dict]:
@@ -343,8 +425,12 @@ def _page_alpha_expr(page: dict) -> str | None:
 
     if page.get("animate_lead_in") and page["lead_anim_dur"] > 0:
         ad = page["lead_anim_dur"]
+        cs = page["content_start"]
         t1 = ss + ad
-        expr = f"if(lt(t,{ss:.3f}),0,if(lt(t,{t1:.3f}),(t-{ss:.3f})/{ad:.3f},1))"
+        expr = (
+            f"if(lt(t,{ss:.3f}),0,"
+            f"if(lt(t,{cs:.3f}),if(lt(t,{t1:.3f}),(t-{ss:.3f})/{ad:.3f},1),1))"
+        )
     else:
         expr = f"if(between(t,{ss:.3f},{se:.3f}),1,0)"
 
