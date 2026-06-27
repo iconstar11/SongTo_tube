@@ -302,8 +302,9 @@ def _trim_prev_for_tight_next(pages: list[dict], pi: int, intro_dur: float) -> N
 
     page["show_start"] = max(prev["show_end"], page["_ideal_start"], intro_dur)
     page["show_start"] = min(page["show_start"], page["content_start"])
-    page["show_end"] = max(page["show_end"], page["show_start"] + 0.05)
-    _apply_page_anim_flags(page)
+    if "show_end" in page:
+        page["show_end"] = max(page["show_end"], page["show_start"] + 0.05)
+        _apply_page_anim_flags(page)
     _apply_page_anim_flags(prev)
 
 
@@ -380,8 +381,6 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
         page["_show_end"] = ce + hold + fade_out
 
     for pi, page in enumerate(pages):
-        _trim_prev_for_tight_next(pages, pi, intro_dur)
-
         if pi == 0:
             page["show_start"] = max(page["_ideal_start"], intro_dur)
         else:
@@ -398,6 +397,10 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
 
         page["start_sec"] = page["content_start"]
         page["end_sec"] = page["content_end"]
+
+    for pi in range(1, len(pages)):
+        if pages[pi].get("tight_incoming"):
+            _trim_prev_for_tight_next(pages, pi, intro_dur)
 
     _enforce_first_word_lead(pages, intro_dur)
 
