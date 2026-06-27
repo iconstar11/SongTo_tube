@@ -94,128 +94,268 @@ def _clean_and_align_timestamps(alignment: list[dict], snap_threshold_ms: int = 
 
     return words
 
+def _gap_break_strength(gap_s: float) -> float:
+    """Higher score = better place to end a line or page (natural singing pause)."""
+    if gap_s >= config.GAP_STRONG_BREAK_S:
+        return 1.0
+    if gap_s >= config.GAP_MEDIUM_BREAK_S:
+        return 0.6
+    if gap_s >= config.GAP_TIGHT_S:
+        return 0.25
+    return 0.0
+
+
+def _line_gap_sec(prev_line: dict, next_line: dict) -> float:
+    return max(0.0, next_line["start_sec"] - prev_line["end_sec"])
+
+
+def _word_gap_ms(prev_word: dict, next_word: dict) -> int:
+    return max(0, next_word["start_ms"] - prev_word["end_ms"])
+
+
+def _measure_words_width(words: list[dict], font_size: int) -> int:
+    if not words:
+        return 0
+    space_w = _measure_width(" ", font_size)
+    total = 0
+    for i, w in enumerate(words):
+        total += _measure_width(w["word"].upper(), font_size)
+        if i < len(words) - 1:
+            total += space_w
+    return total
+
+
+def _best_split_index(words: list[dict], *, min_words: int = 1) -> int:
+    """Pick the split index with the strongest inter-word pause, else midpoint."""
+    if len(words) <= min_words:
+        return 0
+
+    best_score = -1.0
+    best_idx = len(words) // 2
+    for idx in range(min_words, len(words)):
+        gap_s = _word_gap_ms(words[idx - 1], words[idx]) / 1000.0
+        score = _gap_break_strength(gap_s)
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    return best_idx if best_score > 0 else max(min_words, len(words) // 2)
+
+
+def _finalize_line(words: list[dict]) -> dict:
+    return {
+        "words": words,
+        "start_sec": words[0]["start_ms"] / 1000.0,
+        "end_sec": words[-1]["end_ms"] / 1000.0,
+    }
+
+
 def _group_into_lines(alignment: list[dict]) -> list[dict]:
-    lines = []
-    current_words = []
+    lines: list[dict] = []
+    current_words: list[dict] = []
     current_w = 0
     space_w = _measure_width(" ", config.FONT_SIZE)
     last_end = None
+    strong_gap_ms = int(config.GAP_STRONG_BREAK_S * 1000)
 
-    for i, w in enumerate(alignment):
+    for w in alignment:
         word_text = w["word"].upper()
         word_w = _measure_width(word_text, config.FONT_SIZE)
         start = w["start_ms"]
 
-        # Ensure we do NOT split the line right before this word if it starts at the same time
-        # as the previous word (i.e. keep snapped/simultaneous words on the same screen/line)
-        can_split = True
-        if current_words and current_words[-1]["start_ms"] == start:
-            can_split = False
+        can_split = not (current_words and current_words[-1]["start_ms"] == start)
 
-        # Rule: Gap > 2s or Width exceeded
-        gap_trigger = last_end is not None and start - last_end > 2000
-        width_trigger = current_words and current_w + word_w + space_w > config.MAX_WIDTH_PX
+        gap_trigger = last_end is not None and start - last_end >= strong_gap_ms
+        width_trigger = bool(current_words and current_w + word_w + space_w > config.MAX_WIDTH_PX)
 
-        # Tempo Trigger: cap at 5 words if the words are fast-paced
         tempo_trigger = False
         if current_words and len(current_words) >= 5:
             avg_dur = sum(wd["end_ms"] - wd["start_ms"] for wd in current_words) / len(current_words)
-            if avg_dur < config.FAST_WORD_DURATION_MS:
-                tempo_trigger = True
+            tempo_trigger = avg_dur < config.FAST_WORD_DURATION_MS
 
-        # Max Duration Trigger: split if line extends past max duration (6s)
         dur_trigger = False
         if current_words:
             line_duration = w["end_ms"] - current_words[0]["start_ms"]
-            if line_duration > config.MAX_LINE_DURATION_MS:
-                dur_trigger = True
+            dur_trigger = line_duration > config.MAX_LINE_DURATION_MS
 
-        if can_split and (gap_trigger or width_trigger or tempo_trigger or dur_trigger):
-            lines.append({"words": current_words})
-            current_words = []
-            current_w = 0
+        if can_split and current_words and (gap_trigger or width_trigger or tempo_trigger or dur_trigger):
+            if gap_trigger:
+                lines.append(_finalize_line(current_words))
+                current_words = []
+                current_w = 0
+            elif len(current_words) > 1:
+                split_at = _best_split_index(current_words)
+                lines.append(_finalize_line(current_words[:split_at]))
+                current_words = current_words[split_at:]
+                current_w = _measure_words_width(current_words, config.FONT_SIZE)
+            else:
+                lines.append(_finalize_line(current_words))
+                current_words = []
+                current_w = 0
 
         current_words.append(w)
         current_w += word_w + space_w
         last_end = w["end_ms"]
 
     if current_words:
-        lines.append({"words": current_words})
-    
-    for line in lines:
-        line["start_sec"] = line["words"][0]["start_ms"] / 1000.0
-        line["end_sec"] = line["words"][-1]["end_ms"] / 1000.0
-    
+        lines.append(_finalize_line(current_words))
+
     return lines
 
-def _build_pages(lines: list[dict], intro_dur: float) -> list[dict]:
-    pages = []
+
+def _pack_pages(lines: list[dict]) -> list[dict]:
+    """Group 1–3 lines per page using timestamp-gap scoring."""
+    if not lines:
+        return []
+
+    pages: list[dict] = []
     i = 0
-    page_split_gap_s = 2.0
     while i < len(lines):
-        pair = [lines[i]]
-        if i + 1 < len(lines):
-            gap = lines[i + 1]["start_sec"] - lines[i]["end_sec"]
-            if gap < page_split_gap_s:
-                pair.append(lines[i + 1])
-        
+        page_lines = [lines[i]]
+        j = i + 1
+
+        while j < len(lines) and len(page_lines) < config.PAGE_MAX_LINES:
+            gap = _line_gap_sec(page_lines[-1], lines[j])
+            strength = _gap_break_strength(gap)
+
+            if strength >= 0.8:
+                break
+
+            page_start = page_lines[0]["start_sec"]
+            page_end = lines[j]["end_sec"]
+            if page_end - page_start > config.PAGE_TARGET_MAX_S and len(page_lines) >= 1:
+                break
+
+            if strength >= 0.5 and len(page_lines) >= 2:
+                break
+
+            page_lines.append(lines[j])
+            j += 1
+
         pages.append({
-            "lines": pair,
-            "start_sec": pair[0]["start_sec"],
-            "end_sec": pair[-1]["end_sec"]
+            "lines": page_lines,
+            "content_start": page_lines[0]["start_sec"],
+            "content_end": page_lines[-1]["end_sec"],
         })
-        i += len(pair)
+        i = j
 
-    # Crossfade overlaps
-    fade_s = config.FADE_MS / 1000.0
-    lead_in_s = config.LEAD_IN_MS / 1000.0
-    
-    for pi in range(len(pages)):
-        p = pages[pi]
-        p["show_start"] = p["start_sec"] - lead_in_s
-        p["show_end"] = p["end_sec"] + fade_s
-
-    # Resolve page overlaps by shortening/truncating the previous page's end_sec (last-word shortening)
-    for pi in range(len(pages)):
-        if pi > 0:
-            prev_page = pages[pi-1]
-            curr_page = pages[pi]
-            
-            desired_start = curr_page["start_sec"] - lead_in_s
-            desired_start = max(intro_dur, desired_start)
-            
-            if prev_page["show_end"] > desired_start:
-                # Shorten prev_page["show_end"] to match the desired_start of current page
-                new_end_sec = desired_start - fade_s
-                
-                # SAFETY CAP: Make sure we do not shorten past the last word's start time + 100ms
-                last_word = prev_page["lines"][-1]["words"][-1]
-                min_end_sec = last_word["start_ms"] / 1000.0 + 0.1
-                
-                new_end_sec = max(min_end_sec, new_end_sec)
-                # Check that we don't shorten it past the start time of the previous page
-                new_end_sec = max(prev_page["start_sec"], new_end_sec)
-                
-                prev_page["end_sec"] = new_end_sec
-                prev_page["show_end"] = new_end_sec + fade_s
-                
-                # Update the corresponding word's end_ms in the alignment list
-                last_word["end_ms"] = round(new_end_sec * 1000)
-                if last_word["end_ms"] <= last_word["start_ms"]:
-                    last_word["end_ms"] = last_word["start_ms"] + 1
-
-    # Resolve remaining timing adjustments chronologically
-    for pi in range(len(pages)):
-        if pi > 0:
-            limit_start = pages[pi-1]["show_end"]
-        else:
-            limit_start = intro_dur
-            
-        # FORCE absolute separation: current page's show_start must be >= previous page's show_end
-        pages[pi]["show_start"] = max(limit_start, min(pages[pi]["start_sec"], pages[pi]["show_start"]))
-        pages[pi]["show_start"] = max(intro_dur, pages[pi]["show_start"])
-            
     return pages
+
+
+def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
+    """Assign show_start/show_end and animation flags without mutating word timestamps."""
+    lead_max = config.LEAD_IN_MS / 1000.0
+    fade_max = config.FADE_MS / 1000.0
+
+    for pi, page in enumerate(pages):
+        cs = page["content_start"]
+        ce = page["content_end"]
+
+        if pi + 1 < len(pages):
+            transition_gap = max(0.0, pages[pi + 1]["content_start"] - ce)
+        else:
+            transition_gap = config.PAGE_HOLD_MAX_S + lead_max
+
+        page["transition_gap"] = transition_gap
+
+        if transition_gap < config.ANIM_MIN_GAP_S:
+            eff_lead = 0.0
+            hold = 0.0
+            fade_out = 0.0
+            animate = False
+        elif transition_gap < config.GAP_MEDIUM_BREAK_S:
+            eff_lead = min(lead_max, transition_gap * 0.25)
+            hold = min(transition_gap * 0.3, config.PAGE_HOLD_MAX_S * 0.5)
+            fade_out = 0.0
+            animate = False
+        else:
+            eff_lead = min(lead_max, transition_gap * 0.55)
+            hold = min(transition_gap * 0.45, config.PAGE_HOLD_MAX_S)
+            fade_out = fade_max if hold >= 0.2 else 0.0
+            animate = True
+
+        page["effective_lead_in"] = eff_lead
+        page["hold_after"] = hold
+        page["animate"] = animate
+        page["fade_out_dur"] = fade_out
+        page["_ideal_start"] = cs - eff_lead
+        page["_show_end"] = ce + hold + fade_out
+
+    for pi, page in enumerate(pages):
+        if pi == 0:
+            page["show_start"] = max(page["_ideal_start"], intro_dur)
+        else:
+            prev = pages[pi - 1]
+            page["show_start"] = max(prev["show_end"], page["_ideal_start"], intro_dur)
+            if prev["show_end"] > page["show_start"]:
+                prev["show_end"] = page["show_start"]
+                if prev["show_end"] - prev["content_end"] < 0.15:
+                    prev["animate_fade_out"] = False
+                    prev["fade_out_dur"] = 0.0
+
+        page["show_end"] = max(page["_show_end"], page["show_start"] + 0.05)
+
+        lead_window = max(0.0, page["content_start"] - page["show_start"])
+        page["lead_anim_dur"] = min(0.5, lead_window) if page["animate"] and lead_window >= 0.35 else 0.0
+        page["animate_lead_in"] = page["lead_anim_dur"] > 0
+        page["animate_fade_out"] = (
+            page["animate"]
+            and page["fade_out_dur"] > 0
+            and (page["show_end"] - page["content_end"]) >= 0.2
+        )
+
+        page["start_sec"] = page["content_start"]
+        page["end_sec"] = page["content_end"]
+
+
+def _build_pages(lines: list[dict], intro_dur: float) -> list[dict]:
+    pages = _pack_pages(lines)
+    _compute_page_timing(pages, intro_dur)
+    return pages
+
+
+def _line_y_positions(line_count: int) -> list[float]:
+    spacing = config.LINE_SPACING
+    center = config.LYRIC_CENTER_Y
+    block = (line_count - 1) * spacing
+    start_y = center - block / 2
+    return [start_y + i * spacing for i in range(line_count)]
+
+
+def _page_alpha_expr(page: dict) -> str | None:
+    ss = page["show_start"]
+    se = page["show_end"]
+
+    if not page.get("animate_lead_in") and not page.get("animate_fade_out"):
+        return None
+
+    if page.get("animate_lead_in") and page["lead_anim_dur"] > 0:
+        ad = page["lead_anim_dur"]
+        t1 = ss + ad
+        expr = f"if(lt(t,{ss:.3f}),0,if(lt(t,{t1:.3f}),(t-{ss:.3f})/{ad:.3f},1))"
+    else:
+        expr = f"if(between(t,{ss:.3f},{se:.3f}),1,0)"
+
+    if page.get("animate_fade_out") and page["fade_out_dur"] > 0:
+        fd = page["fade_out_dur"]
+        fs = se - fd
+        expr = f"if(gt(t,{fs:.3f}),max(0,({se:.3f}-t)/{fd:.3f}),{expr})"
+
+    return expr
+
+
+def _page_y_expr(base_y: float, page: dict) -> str:
+    if not page.get("animate_lead_in") or page["lead_anim_dur"] <= 0:
+        return f"{base_y:.1f}"
+
+    ss = page["show_start"]
+    cs = page["content_start"]
+    ad = page["lead_anim_dur"]
+    slide = config.PAGE_LEAD_SLIDE_PX
+    return (
+        f"{base_y:.1f}+if(lt(t,{cs:.3f}),"
+        f"max(0,{slide}*(1-min(1,max(0,(t-{ss:.3f})/{ad:.3f})))),0)"
+    )
 
 def _crop_and_resize(img: Image.Image, target_w: int = 1920, target_h: int = 1080) -> Image.Image:
     target_ratio = target_w / target_h
@@ -358,39 +498,47 @@ def _build_filters(title: str, artist: str, pages: list[dict], intro_dur: float)
 
     for page in pages:
         ss, se = page["show_start"], page["show_end"]
+        alpha_expr = _page_alpha_expr(page)
+        y_positions = _line_y_positions(len(page["lines"]))
+
         for li, line in enumerate(page["lines"]):
-            y = config.CURRENT_LINE_Y + (li * config.NEXT_LINE_Y_DELTA)
+            base_y = y_positions[li]
+            y_expr = _page_y_expr(base_y, page)
             full_line_text = " ".join([w["word"].upper() for w in line["words"]])
-            line_w = _measure_width(full_line_text, config.FONT_SIZE)
+            font_size = _get_scaled_font_size(full_line_text, config.FONT_SIZE, config.MAX_WIDTH_PX)
+            line_w = _measure_width(full_line_text, font_size)
             start_x = (1920 - line_w) / 2
             curr_x = start_x
+
             for w in line["words"]:
                 txt = w["word"].upper().replace("'", "").replace(":", "")
-                
+
+                base = (
+                    f"drawtext=fontfile='{font_path}':text='{txt}':fontsize={font_size}:"
+                    f"x={curr_x}:y='{y_expr}':shadowcolor={shadow}:shadowx=4:shadowy=4"
+                )
+                alpha_suffix = f":alpha='{alpha_expr}'" if alpha_expr else ""
+
                 if config.HIGHLIGHT_WORDS:
                     ts = max(ss, (w["start_ms"] - config.HIGHLIGHT_OFFSET_MS) / 1000.0)
-                    te = w["end_ms"]/1000.0
-                    
-                    # Highlighted (Gold)
+                    te = w["end_ms"] / 1000.0
+
                     filters.append(
-                        f"drawtext=fontfile='{font_path}':text='{txt}':fontsize={config.FONT_SIZE}:"
-                        f"fontcolor={config.ACCENT_COLOR}:x={curr_x}:y={y}:shadowcolor={shadow}:shadowx=4:shadowy=4:"
-                        f"enable='gte(t,{ts:.3f})*lt(t,{te:.3f})'"
+                        f"{base}:fontcolor={config.ACCENT_COLOR}:"
+                        f"enable='gte(t,{ts:.3f})*lt(t,{te:.3f})'{alpha_suffix}"
                     )
-                    # Normal (White) - only show when not highlighted
                     filters.append(
-                        f"drawtext=fontfile='{font_path}':text='{txt}':fontsize={config.FONT_SIZE}:"
-                        f"fontcolor={config.TEXT_COLOR}:x={curr_x}:y={y}:shadowcolor={shadow}:shadowx=4:shadowy=4:"
+                        f"{base}:fontcolor={config.TEXT_COLOR}:"
                         f"enable='gte(t,{ss:.3f})*lt(t,{se:.3f})*not(gte(t,{ts:.3f})*lt(t,{te:.3f}))'"
+                        f"{alpha_suffix}"
                     )
                 else:
-                    # Normal (White) - show during the entire page visibility
                     filters.append(
-                        f"drawtext=fontfile='{font_path}':text='{txt}':fontsize={config.FONT_SIZE}:"
-                        f"fontcolor={config.TEXT_COLOR}:x={curr_x}:y={y}:shadowcolor={shadow}:shadowx=4:shadowy=4:"
-                        f"enable='gte(t,{ss:.3f})*lt(t,{se:.3f})'"
+                        f"{base}:fontcolor={config.TEXT_COLOR}:"
+                        f"enable='gte(t,{ss:.3f})*lt(t,{se:.3f})'{alpha_suffix}"
                     )
-                curr_x += _measure_width(txt + " ", config.FONT_SIZE)
+
+                curr_x += _measure_width(txt + " ", font_size)
     return ",".join(filters)
 
 def run(info: dict, alignment: list) -> Path:
