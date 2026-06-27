@@ -242,10 +242,23 @@ def _pack_pages(lines: list[dict]) -> list[dict]:
     return pages
 
 
+def _lead_anim_duration(lead_window: float, animate: bool) -> float:
+    if not animate or lead_window < config.PAGE_LEAD_ANIM_MIN_S:
+        return 0.0
+    dur = min(config.PAGE_LEAD_ANIM_MAX_S, lead_window * config.PAGE_LEAD_ANIM_RATIO)
+    return min(dur, lead_window)
+
+
+def _fade_anim_duration(hold_window: float, animate: bool) -> float:
+    if not animate or hold_window < config.PAGE_FADE_ANIM_MIN_S:
+        return 0.0
+    dur = min(config.PAGE_FADE_ANIM_MAX_S, hold_window * config.PAGE_FADE_ANIM_RATIO)
+    return min(dur, hold_window)
+
+
 def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
     """Assign show_start/show_end and animation flags without mutating word timestamps."""
     lead_max = config.LEAD_IN_MS / 1000.0
-    fade_max = config.FADE_MS / 1000.0
 
     for pi, page in enumerate(pages):
         cs = page["content_start"]
@@ -269,10 +282,10 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
             fade_out = 0.0
             animate = False
         else:
-            eff_lead = min(lead_max, transition_gap * 0.55)
+            eff_lead = min(lead_max, transition_gap * 0.65)
             hold = min(transition_gap * 0.45, config.PAGE_HOLD_MAX_S)
-            fade_out = fade_max if hold >= 0.2 else 0.0
             animate = True
+            fade_out = _fade_anim_duration(hold, animate)
 
         page["effective_lead_in"] = eff_lead
         page["hold_after"] = hold
@@ -296,13 +309,12 @@ def _compute_page_timing(pages: list[dict], intro_dur: float) -> None:
         page["show_end"] = max(page["_show_end"], page["show_start"] + 0.05)
 
         lead_window = max(0.0, page["content_start"] - page["show_start"])
-        page["lead_anim_dur"] = min(0.5, lead_window) if page["animate"] and lead_window >= 0.35 else 0.0
-        page["animate_lead_in"] = page["lead_anim_dur"] > 0
-        page["animate_fade_out"] = (
-            page["animate"]
-            and page["fade_out_dur"] > 0
-            and (page["show_end"] - page["content_end"]) >= 0.2
-        )
+        hold_window = max(0.0, page["show_end"] - page["content_end"])
+
+        page["lead_anim_dur"] = _lead_anim_duration(lead_window, page["animate"])
+        page["fade_out_dur"] = _fade_anim_duration(hold_window, page["animate"])
+        page["animate_lead_in"] = page["lead_anim_dur"] >= 0.25
+        page["animate_fade_out"] = page["fade_out_dur"] >= 0.25
 
         page["start_sec"] = page["content_start"]
         page["end_sec"] = page["content_end"]
