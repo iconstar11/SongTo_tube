@@ -29,6 +29,9 @@ _JOB_COLUMNS = {
     "lyrics_mode": "TEXT",
     "background_retry_count": "INTEGER DEFAULT 0",
     "background_seen_urls": "TEXT",
+    "shorts_paths": "TEXT",
+    "post_status": "TEXT DEFAULT 'to_post'",
+    "posted_at": "TIMESTAMP",
 }
 
 
@@ -332,6 +335,40 @@ def get_next_job():
                 "SELECT * FROM jobs WHERE status = 'QUEUED' ORDER BY created_at LIMIT 1"
             ).fetchone()
             return dict(row) if row else None
+
+
+def save_shorts_paths(job_id: int, paths: list[str]) -> None:
+    with _lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET shorts_paths = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (json.dumps(paths), job_id),
+            )
+
+
+def mark_job_posted(job_id: int, video_path: str | None, shorts_paths: list[str] | None) -> None:
+    with _lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET video_path = COALESCE(?, video_path),
+                    shorts_paths = COALESCE(?, shorts_paths),
+                    post_status = 'posted',
+                    posted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    video_path,
+                    json.dumps(shorts_paths) if shorts_paths is not None else None,
+                    job_id,
+                ),
+            )
 
 
 def get_recent_jobs(chat_id: str = None, limit: int = 8) -> list[dict]:

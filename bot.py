@@ -5,7 +5,8 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS, TEMP_DIR
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS, TEMP_DIR, ensure_output_dirs
+from pipeline.output_paths import move_job_outputs_to_posted, rewrite_path_to_posted
 from pipeline.color_overlay import PRODUCTION_OVERLAYS
 from pipeline.lyrics_hint import save_lyrics_md
 from pipeline.overlay_preview import build_overlay_comparison_grid, render_overlay_preview
@@ -90,7 +91,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. Wait for the background preview photo\n"
         "4. Tap <b>Approve</b> or <b>New Image</b>\n"
         "5. Choose a mood overlay\n"
-        "6. Receive the finished video\n\n"
+        "6. Receive the finished video\n"
+        "7. After publishing: <code>/posted &lt;job_id&gt;</code>\n\n"
         "/status — your recent jobs",
         parse_mode="HTML",
     )
@@ -101,6 +103,72 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     jobs = db.get_recent_jobs(chat_id=str(update.effective_chat.id))
     await update.message.reply_text(ui.format_status_list(jobs), parse_mode="HTML")
+
+
+async def cmd_posted(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mark a completed job's outputs as posted (moves to_post/ → posted/)."""
+    if not _authorized(update.effective_chat.id):
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/posted &lt;job_id&gt;</code>\n"
+            "Moves video(s) from <code>to_post/</code> to <code>posted/</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        job_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Job ID must be a number.", parse_mode="HTML")
+        return
+
+    job = db.get_job(job_id)
+    if not job:
+        await update.message.reply_text(f"Job #{job_id} not found.", parse_mode="HTML")
+        return
+
+    if job.get("status") != "COMPLETED":
+        await update.message.reply_text(
+            f"Job #{job_id} is <b>{job['status']}</b> — only COMPLETED jobs can be marked posted.",
+            parse_mode="HTML",
+        )
+        return
+
+    if job.get("post_status") == "posted":
+        await update.message.reply_text(f"Job #{job_id} is already marked posted.", parse_mode="HTML")
+        return
+
+    try:
+        moved = move_job_outputs_to_posted(job)
+        if not moved:
+            await update.message.reply_text(
+                f"No files in <code>to_post/</code> for job #{job_id}.",
+                parse_mode="HTML",
+            )
+            return
+
+        new_video = rewrite_path_to_posted(job.get("video_path") or "")
+        shorts_raw = job.get("shorts_paths")
+        new_shorts = None
+        if shorts_raw:
+            import json
+            try:
+                new_shorts = [rewrite_path_to_posted(p) for p in json.loads(shorts_raw)]
+            except json.JSONDecodeError:
+                new_shorts = None
+
+        db.mark_job_posted(job_id, new_video if new_video else None, new_shorts)
+        names = "\n".join(f"• <code>{p}</code>" for p in moved)
+        await update.message.reply_text(
+            f"✅ Job #{job_id} marked <b>posted</b> ({len(moved)} file(s)):\n{names}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception(f"mark posted failed for job #{job_id}")
+        await update.message.reply_text(f"Failed: <code>{e}</code>", parse_mode="HTML")
 
 
 async def _start_fetching_preview_message(query_or_update, job: dict, lyrics_mode: str | None = None):
@@ -509,11 +577,13 @@ def main():
         return
 
     db.init_db()
+    ensure_output_dirs()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("posted", cmd_posted))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_lyrics_have, pattern=r"^lyrhave:"))
     application.add_handler(CallbackQueryHandler(handle_lyrics_skip, pattern=r"^lyrskip:"))

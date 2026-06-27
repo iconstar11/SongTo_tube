@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import config
 from pipeline.color_overlay import apply_overlay, resolve_overlay
+from pipeline.output_paths import to_post_video_path
 
 # Add project root to path for package imports
 _root = Path(__file__).resolve().parent.parent
@@ -759,7 +760,7 @@ def run(info: dict, alignment: list) -> Path:
         
     filter_file.write_text(filter_script_content, encoding="utf-8")
         
-    output_path = config.OUTPUT_DIR / f"{title}_7clouds.mp4"
+    output_path = to_post_video_path(title)
     video_duration = info['duration'] - trim_offset_s + pad_delay_s
     
     # Dynamically build FFmpeg command to support input seeking (-ss) for trimming

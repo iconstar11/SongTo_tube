@@ -42,7 +42,10 @@ from segment_picker import ClipWindow, pick_three_clips, clips_to_debug_dict
 _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
+import db  # noqa: E402
+from config import OUTPUT_TO_POST_SHORTS  # noqa: E402
 from pipeline.lyrics_hint import filter_section_labels  # noqa: E402
+from pipeline.output_paths import SHORTS_SLOT_SUFFIX, to_post_shorts_path  # noqa: E402
 
 XPT_DIR = Path(__file__).resolve().parent
 REFERENCE_FRAME = XPT_DIR / "frames" / "frame_003.png"
@@ -55,7 +58,7 @@ FRAMES_DIR = XPT_DIR / "render_frames"
 FPS = 30
 
 SHORTS_PER_SONG = 3
-SLOT_SUFFIX = {"chorus": "1_chorus", "improv_a": "2_improv", "improv_b": "3_improv"}
+SLOT_SUFFIX = SHORTS_SLOT_SUFFIX
 
 FONT_CANDIDATES = [
     Path(r"C:\Windows\Fonts\segoeui.ttf"),
@@ -267,10 +270,6 @@ def render_animated_video(
     return output_path
 
 
-def _safe_title(title: str) -> str:
-    return "".join(c for c in title if c.isalnum() or c in " -_").strip().replace(" ", "_")
-
-
 def _write_bundle_debug(job_id: int, job: dict, clips: list[ClipWindow], outputs: list[dict]) -> Path:
     report = {
         "job_id": job_id,
@@ -280,7 +279,8 @@ def _write_bundle_debug(job_id: int, job: dict, clips: list[ClipWindow], outputs
         "clips": clips_to_debug_dict(clips),
         "outputs": outputs,
     }
-    path = XPT_DIR / f"job_{job_id}_shorts_bundle.json"
+    OUTPUT_TO_POST_SHORTS.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT_TO_POST_SHORTS / f"job_{job_id}_shorts_bundle.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[debug] bundle saved {path}")
     return path
@@ -294,13 +294,12 @@ def render_one_clip(
     alignment_path: Path,
     lyric_font,
     display_title: str,
-    safe: str,
 ) -> dict:
     clip_start_s = clip.start_ms / 1000.0
     clip_end_s = clip.end_ms / 1000.0
     suffix = SLOT_SUFFIX.get(clip.slot, clip.slot)
     clip_audio = XPT_DIR / f"clip_{job['id']}_{suffix}.wav"
-    out = XPT_DIR / f"{safe}_shorts_{suffix}.mp4"
+    out = to_post_shorts_path(display_title, suffix)
 
     print(
         f"[clip {suffix}] {clip.label} ({clip.source}) "
@@ -354,7 +353,6 @@ def render_pipeline_short(job_id: int | None = None, output_path: Path | None = 
         print(f"  • {c.slot}: {c.label} [{c.source}] {c.duration_s:.1f}s")
 
     lyric_font = _load_font(27)
-    safe = _safe_title(title)
     outputs_meta: list[dict] = []
     paths: list[Path] = []
 
@@ -366,12 +364,13 @@ def render_pipeline_short(job_id: int | None = None, output_path: Path | None = 
             alignment_path=alignment_path,
             lyric_font=lyric_font,
             display_title=display_title,
-            safe=safe,
         )
         outputs_meta.append(meta)
         paths.append(Path(meta["path"]))
 
     _write_bundle_debug(job["id"], job, clips, outputs_meta)
+    db.save_shorts_paths(job["id"], [str(p) for p in paths])
+    print(f"[pipeline] saved {len(paths)} shorts path(s) to jobs.db")
 
     if output_path:
         print(f"[note] --output ignored for multi-short mode; see bundle JSON")

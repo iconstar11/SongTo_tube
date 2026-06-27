@@ -238,6 +238,7 @@ def format_status_list(jobs: list[dict]) -> str:
         title = job.get("title") or "—"
         artist = job.get("artist") or ""
         song = f"{artist} — {title}".strip(" —") if artist or title != "—" else "—"
+        post = job.get("post_status") or "—"
         lines.append(f"#{job['id']} · <b>{job['status']}</b> · {song}")
-        lines.append(f"   Overlay: {overlay}")
+        lines.append(f"   Overlay: {overlay} · Post: {post}")
     return "\n".join(lines)

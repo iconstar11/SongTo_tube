@@ -8,7 +8,8 @@ import db
 from pipeline import stage1_download, stage2_demucs, stage3_transcribe, stage4_render, stage5_upload, background_fetcher
 from pipeline.preview_background import build_preview
 from pipeline.stage5_upload import youtube_configured
-from config import TELEGRAM_BOT_TOKEN, TEMP_DIR
+from config import TELEGRAM_BOT_TOKEN, TEMP_DIR, ensure_output_dirs
+from pipeline.output_paths import move_job_outputs_to_posted, rewrite_path_to_posted
 import telegram_ui as ui
 from telegram import Bot, InputMediaPhoto
 from telegram.error import BadRequest
@@ -311,6 +312,18 @@ async def run_pipeline(job: dict):
                 db.update_job_status(job_id, "UPLOADING", youtube_status=f"failed:{youtube_result.get('reason')}")
 
         db.update_job_status(job_id, "COMPLETED", video_path=str(video_path))
+
+        if youtube_result.get("ok"):
+            try:
+                job_after = db.get_job(job_id) or job
+                moved = move_job_outputs_to_posted(job_after)
+                if moved:
+                    new_video = rewrite_path_to_posted(str(video_path))
+                    db.mark_job_posted(job_id, new_video, None)
+                    logger.info(f"Job #{job_id}: moved {len(moved)} file(s) to posted/")
+            except Exception as move_err:
+                logger.warning(f"Job #{job_id}: could not move to posted/: {move_err}")
+
         summary = ui.format_complete(
             job_id, info["title"], info["artist"],
             job.get("color_overlay"), telegram_sent, youtube_result,
@@ -329,6 +342,7 @@ async def main():
     else:
         logger.info("YouTube upload is disabled or not configured.")
 
+    ensure_output_dirs()
     logger.info("Worker started. Checking for jobs...")
     while True:
         job = db.get_next_job()

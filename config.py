@@ -29,8 +29,27 @@ PARTICLES_DIR = ASSETS_DIR / "particles"
 OUTPUT_DIR = BASE_DIR / os.getenv("OUTPUT_DIR", "outputs")
 TEMP_DIR = BASE_DIR / os.getenv("TEMP_DIR", "temp")
 
+OUTPUT_POSTED = OUTPUT_DIR / "posted"
+OUTPUT_TO_POST = OUTPUT_DIR / "to_post"
+OUTPUT_POSTED_VIDEO = OUTPUT_POSTED / "video"
+OUTPUT_POSTED_SHORTS = OUTPUT_POSTED / "shorts"
+OUTPUT_TO_POST_VIDEO = OUTPUT_TO_POST / "video"
+OUTPUT_TO_POST_SHORTS = OUTPUT_TO_POST / "shorts"
+
+
+def ensure_output_dirs() -> None:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    for folder in (
+        OUTPUT_POSTED_VIDEO,
+        OUTPUT_POSTED_SHORTS,
+        OUTPUT_TO_POST_VIDEO,
+        OUTPUT_TO_POST_SHORTS,
+    ):
+        folder.mkdir(parents=True, exist_ok=True)
+
+
 # Ensure directories exist
-OUTPUT_DIR.mkdir(exist_ok=True)
+ensure_output_dirs()
 TEMP_DIR.mkdir(exist_ok=True)
 PARTICLES_DIR.mkdir(exist_ok=True)
 
